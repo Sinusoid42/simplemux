@@ -3,7 +3,7 @@
 This is a simple implementation of the already existing ServeHTTP for a given Websocket.
 This multiplexer just simply runs HTTP, allows very fast Restful API implementations in Go.
 
-```
+```go
 package main
 
 import (
