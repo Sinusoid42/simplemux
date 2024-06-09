@@ -1,8 +1,14 @@
+# Simple Golang Multiplexer Implementation
+
+This is a simple implementation of the already existing ServeHTTP for a given Websocket.
+This multiplexer just simply runs HTTP, allows very fast Restful API implementations in Go.
+
+```
 package main
 
 import (
 	"net/http"
-	"simplemux"
+	"github.com/Sinusoid42/simplemux"
 )
 
 func handleFunc(w http.ResponseWriter, r *http.Request) {
@@ -22,3 +28,4 @@ func main() {
 
 	mux.Wait() //Wait for the server to stop or on SIGITNT
 }
+```
