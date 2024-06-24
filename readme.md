@@ -3,6 +3,9 @@
 This is a simple implementation of the already existing ServeHTTP for a given Websocket.
 This multiplexer just simply runs HTTP, allows very fast Restful API implementations in Go.
 
+---
+ 
+ 
 ```go
 package main
 
@@ -29,3 +32,8 @@ func main() {
 	mux.Wait() //Wait for the server to stop or on SIGITNT
 }
 ```
+
+---
+
+Either a request method exactly matching the http method in the definition or if nothing is provided a wildcard is used.
+This software adds only a small and fast parsing and better autoresponse to the already existing ServeHTTP.

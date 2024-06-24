@@ -4,11 +4,21 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	`os`
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
+
+type MiddlewareFunc func(http.Handler) http.Handler
+
+func (router *Router) use(middleware MiddlewareFunc) {
+	router.middleware = append(router.middleware, middleware)
+}
+
+func (mux *Multiplexer) Use(middleware MiddlewareFunc) {
+	mux.router.use(middleware)
+}
 
 type route_segment struct {
 	is_var   bool
@@ -16,9 +26,10 @@ type route_segment struct {
 }
 
 type Route struct {
-	segments []route_segment
-	method   string
-	Handler  http.HandlerFunc
+	segments    []route_segment
+	method      string
+	Handler     http.HandlerFunc
+	contentType string // New field to handle content type
 }
 
 type RouterMetricCollector struct {
@@ -29,8 +40,44 @@ type RouterMetricCollector struct {
 type Router struct {
 	routes []Route
 
-	//metrics collector
+	not_found_route     Route
+	has_not_found_route bool
+	// metrics collector
 	metrics_collector *RouterMetricCollector
+
+	middleware []MiddlewareFunc
+}
+
+func (mux *Multiplexer) AddGetRoute(route string, handler http.HandlerFunc) {
+	mux.AddRoute("GET "+route, handler, "")
+}
+
+func (mux *Multiplexer) AddPostRoute(route string, handler http.HandlerFunc) {
+	mux.AddRoute("POST "+route, handler, "")
+}
+
+func (mux *Multiplexer) AddPutRoute(route string, handler http.HandlerFunc) {
+	mux.AddRoute("PUT "+route, handler, "")
+}
+
+func (mux *Multiplexer) AddDeleteRoute(route string, handler http.HandlerFunc) {
+	mux.AddRoute("DELETE "+route, handler, "")
+}
+
+func GetPathParams(r *http.Request) map[string]string {
+	if params, ok := r.Context().Value("params").(map[string]string); ok {
+		return params
+	}
+	return nil
+}
+func GetQueryParams(r *http.Request) map[string][]string {
+	return r.URL.Query()
+}
+
+func (router *Router) ServeStatic(pathPrefix, fileDir string) {
+	fileServer := http.FileServer(http.Dir(fileDir))
+	staticHandler := http.StripPrefix(pathPrefix, fileServer)
+	router.add_route("GET "+pathPrefix+"/*", staticHandler.ServeHTTP, "")
 }
 
 type Multiplexer struct {
@@ -48,8 +95,15 @@ type Mux_config struct {
 	Key  string // Path to TLS key file
 }
 
-func (mux *Multiplexer) AddRoute(methodRoute string, handler http.HandlerFunc) {
-	mux.router.add_route(methodRoute, handler)
+func (mux *Multiplexer) AddRoute(methodRoute string, handler http.HandlerFunc, contentType string) {
+	mux.router.add_route(methodRoute, handler, contentType)
+}
+
+func (mux *Multiplexer) Redirect(methodRoute string, redirectUrl string) {
+	redirectHandler := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectUrl, http.StatusFound)
+	}
+	mux.router.add_route(methodRoute, redirectHandler, "")
 }
 
 func Generate_mulitplexer() *Multiplexer {
@@ -67,31 +121,58 @@ func empty_mulitplexer() *Multiplexer {
 	return mux
 }
 
-func (router *Router) add_route(methodRoute string, handler http.HandlerFunc) {
+func (router *Router) add_route(methodRoute string, handler http.HandlerFunc, contentType string) {
 	parts := strings.SplitN(methodRoute, " ", 2)
 
 	var method, pattern string
-
-	// Check if the first part contains a '/', indicating it's a route pattern without a method
 	if strings.Contains(parts[0], "/") {
-		method = "" // No method specified, could use a default value if desired
+		method = ""
 		pattern = parts[0]
 	} else if len(parts) == 2 {
 		method = parts[0]
 		pattern = parts[1]
 	} else {
-		fmt.Println("Invalid methodRoute format: %s", methodRoute)
+		fmt.Printf("Invalid methodRoute format: %s\n", methodRoute)
 		return
 	}
 
 	segments := parsePattern(pattern)
 
 	route := Route{
-		segments: segments,
-		method:   method,
-		Handler:  handler,
+		segments:    segments,
+		method:      method,
+		Handler:     handler,
+		contentType: contentType,
 	}
 	router.routes = append(router.routes, route)
+}
+
+func (router *Router) add_not_found_route(handler http.HandlerFunc) {
+
+	if router.has_not_found_route {
+		fmt.Println("Not found route already exists")
+		return
+	}
+
+	if router.not_found_route.segments != nil {
+		fmt.Println("Not found route already exists")
+		return
+	}
+
+	if handler == nil {
+		fmt.Println("Handler is nil")
+		router.has_not_found_route = false
+
+		return
+	}
+
+	router.not_found_route = Route{
+		segments: nil,
+		method:   "",
+		Handler:  handler,
+	}
+
+	router.has_not_found_route = true
 }
 
 func parsePattern(pattern string) []route_segment {
@@ -133,34 +214,45 @@ func parsePattern(pattern string) []route_segment {
 }
 
 func (router *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-
-	/*if router.authenticator.TLS == nil && req.Method == "GET" {
-		// Construct the HTTPS URL based on your TLS settings
-		httpsURL := "https://" + req.Host + req.URL.String()
-
-		// Redirect to the HTTPS version
-		http.Redirect(w, req, httpsURL, http.StatusMovedPermanently)
-		return
-	}*/
+	var handler http.Handler
 	hasRoute := false
-	for _, route := range router.routes {
 
+	for _, route := range router.routes {
 		if params, ok := match(route.segments, req.URL.Path); ok {
-			hasRoute = true
 			if route.method != "" && route.method != req.Method {
 				continue
 			}
 
+			if route.contentType != "" && route.contentType != req.Header.Get("Content-Type") {
+				continue
+			}
+
+			hasRoute = true
 			req = addParamsToRequest(req, params)
-			route.Handler(w, req)
+			handler = route.Handler
+			break
+		}
+	}
+
+	if handler == nil {
+		if hasRoute {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		if router.has_not_found_route {
+			handler = router.not_found_route.Handler
+		} else {
+			http.NotFound(w, req)
 			return
 		}
 	}
-	if hasRoute {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
+
+	for i := len(router.middleware) - 1; i >= 0; i-- {
+		handler = router.middleware[i](handler)
 	}
-	http.NotFound(w, req)
+
+	handler.ServeHTTP(w, req)
 }
 
 func splitPath(path string) []string {
@@ -229,7 +321,7 @@ func (sm *Multiplexer) Start(config *Mux_config) {
 			fmt.Println("Key or Cert file not found")
 		}
 	}
-	
+
 	sm.wg.Add(1)
 	go func() {
 		defer sm.wg.Done()
